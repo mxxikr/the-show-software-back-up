@@ -1,0 +1,164 @@
+stages:
+  - build
+  - build_notify
+  - deploy
+  - deploy_notify
+
+variables:
+  ACTIVE_PROFILE: prod
+  JAVA_OPTS: "-Xms512m -Xmx1024m -Duser.timezone=Asia/Seoul"
+  GIT_STRATEGY: clone
+
+before_script:
+  - export PATH=$JAVA_HOME/bin:$PATH
+  - export GRADLE_HOME=/opt/gradle-8.5
+  - export PATH=${GRADLE_HOME}/bin:${PATH}
+  - chmod +x ./gradlew
+
+build:
+  stage: build
+  script:
+    - echo "===== 빌드 시작 ====="
+    - ./gradlew build --stacktrace
+    - |
+      if [ $? -eq 0 ]; then
+        echo "SUCCESS" > status_build.txt
+      else
+        echo "FAILED" > status_build.txt
+      fi
+    - echo "===== 빌드 완료 ====="
+  artifacts:
+    paths:
+      - build/libs/*.jar
+      - status_build.txt
+  tags:
+    - ubuntu_runner
+
+build_notify:
+  stage: build_notify
+  needs: ["build"]
+  script:
+    - echo "===== 빌드 결과 확인 중... ====="
+    - |
+      BUILD_RESULT=$(cat status_build.txt)
+      if [ "$BUILD_RESULT" = "SUCCESS" ]; then
+        echo "빌드 성공"
+      else
+        echo "빌드 실패"
+      fi
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "main"'
+      when: always
+    - when: never
+  allow_failure: true
+  tags:
+    - ubuntu_runner
+
+deploy:
+  stage: deploy
+  resource_group: deploy_group
+  allow_failure: false
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "main"'
+      when: always
+  script:
+    - echo "===== 배포 시작 ====="
+    - export ACTIVE_PROFILE=${ACTIVE_PROFILE}
+    - export JAVA_OPTS="${JAVA_OPTS} -Dspring.profiles.active=${ACTIVE_PROFILE}"
+    - export SUDO_ASKPASS='/bin/true'
+    - echo "===== 배포 스크립트 실행 중... ====="
+    - |
+      # JAR 파일 존재 여부 확인
+      if ls build/libs/*.jar 1> /dev/null 2>&1; then
+        echo "JAR 파일 발견, 배포를 진행합니다."
+      else
+        echo "오류: 빌드 결과 JAR 파일을 찾을 수 없습니다."
+        exit 1
+      fi
+
+      # 배포 디렉터리 생성 및 권한 설정
+      if [ ! -d "/home/software/up_down_project" ]; then
+        sudo -A mkdir -p /home/software/up_down_project
+        sudo -A chown $USER:$USER /home/software/up_down_project
+      fi
+      sudo -A chown -R $USER:$USER /home/software/up_down_project
+
+      # JAR 파일 복사
+      echo "===== JAR 파일 복사 ====="
+      cp build/libs/*.jar /home/software/up_down_project/
+
+      # 포트 점유 확인 후 기존 프로세스 종료
+      echo "===== 포트 8383 점유 확인 ====="
+      if sudo lsof -ti:8383 > /dev/null 2>&1; then
+        echo "포트 8383을 사용 중인 프로세스가 있습니다. 종료합니다."
+        sudo lsof -ti:8383 | xargs -r sudo kill -9
+        sleep 3
+      else
+        echo "포트 8383은 사용 중이 아닙니다."
+      fi
+
+      echo "===== 기존 프로세스 종료 ====="
+      pkill -9 -f 'UpDownProject.*SNAPSHOT\.jar' || true
+      sleep 5
+
+      # 새 애플리케이션 실행
+      echo "===== 새 애플리케이션 실행 (포트 8383) ====="
+      nohup java $JAVA_OPTS -jar /home/software/up_down_project/*.jar --server.port=8383 \
+        > /home/software/up_down_project/output.log 2>&1 &
+      sleep 5
+
+      # 실행 확인
+      echo "===== 애플리케이션 실행 확인 ====="
+      retries=3
+      while [ $retries -gt 0 ]
+      do
+        if pgrep -f 'UpDownProject.*SNAPSHOT\.jar' > /dev/null 2>&1
+        then
+          echo "애플리케이션이 정상적으로 실행 중입니다."
+          break
+        else
+          echo "프로세스 확인 안 됨. 재시도합니다..."
+          ((retries--))
+          sleep 5
+        fi
+      done
+
+      if [ $retries -eq 0 ]; then
+        echo "애플리케이션 실행에 실패했습니다. 로그 출력:"
+        cat /home/software/up_down_project/output.log
+        exit 1
+      fi
+
+      # 배포 결과 기록
+      if [ $? -eq 0 ]; then
+        echo "SUCCESS" > status_deploy.txt
+      else
+        echo "FAILED" > status_deploy.txt
+      fi
+
+    - echo "===== 배포 완료 ====="
+  artifacts:
+    paths:
+      - status_deploy.txt
+  tags:
+    - ubuntu_runner
+
+deploy_notify:
+  stage: deploy_notify
+  needs: ["deploy"]
+  script:
+    - echo "===== 배포 결과 확인 중... ====="
+    - |
+      DEPLOY_RESULT=$(cat status_deploy.txt)
+      if [ "$DEPLOY_RESULT" = "SUCCESS" ]; then
+        echo "배포 성공"
+      else
+        echo "배포 실패"
+      fi
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "main"'
+      when: always
+    - when: never
+  allow_failure: true
+  tags:
+    - ubuntu_runner

@@ -1,0 +1,6 @@
+CREATE TABLE binance_price (
+   id BIGINT AUTO_INCREMENT PRIMARY KEY,
+   symbol VARCHAR(10) NOT NULL, -- BTCUSDT
+   price DECIMAL(18,8) NOT NULL, -- 해당 시점의 BTC/USDT 가격
+   timestamp DATETIME NOT NULL
+);

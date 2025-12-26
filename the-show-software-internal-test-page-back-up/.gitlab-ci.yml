@@ -1,0 +1,165 @@
+stages:
+  - build
+  - build_notify
+  - deploy
+  - deploy_notify
+
+variables:
+  ACTIVE_PROFILE: prod
+  JAVA_OPTS: "-Xms512m -Xmx1024m"
+  GIT_STRATEGY: clone
+
+before_script:
+  - export PATH=$JAVA_HOME/bin:$PATH
+  - export GRADLE_HOME=/opt/gradle-8.5
+  - export PATH=${GRADLE_HOME}/bin:${PATH}
+  - chmod +x ./gradlew
+build:
+  stage: build
+  script:
+    - echo "===== Starting build... ====="
+    - ./gradlew build --stacktrace
+    - |
+      if [ $? -eq 0 ]; then
+        echo "SUCCESS" > status_build.txt
+      else
+        echo "FAILED" > status_build.txt
+      fi
+    - echo "===== Build completed ====="
+  tags:
+    - ubuntu_runner
+  artifacts:
+    paths:
+      - build/libs/*.jar
+      - status_build.txt
+
+#build_notify:
+#  stage: build_notify
+#  needs: ["build"]
+#  script:
+#    - echo "===== Checking build result... ====="
+#    - |
+#      BUILD_RESULT=$(cat status_build.txt)
+#      if [ "$BUILD_RESULT" = "SUCCESS" ]; then
+#        echo "빌드 성공 알림 전송..."
+#        curl -X POST -H 'Content-type: application/json' \
+#          --data '{"text":"[빌드 성공] Pipeline '"$CI_PIPELINE_ID"' - 빌드가 정상적으로 완료되었습니다."}' \
+#          "$SLACK_WEBHOOK_URL"
+#      else
+#        echo "빌드 실패 알림 전송..."
+#        curl -X POST -H 'Content-type: application/json' \
+#          --data '{"text":"[빌드 실패] Pipeline '"$CI_PIPELINE_ID"' - 빌드 단계에서 오류가 발생했습니다."}' \
+#          "$SLACK_WEBHOOK_URL"
+#      fi
+#  rules:
+#    - if: '$CI_COMMIT_REF_NAME == "main"'
+#      when: always
+#  allow_failure: true
+#  tags:
+#    - ubuntu_runner
+
+
+deploy:
+  stage: deploy
+  resource_group: deploy_group
+  allow_failure: false
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "main"'
+      when: always
+  script:
+    - echo "===== Starting deployment... ====="
+    - export ACTIVE_PROFILE=${ACTIVE_PROFILE}
+    - export JAVA_OPTS="${JAVA_OPTS} -Dspring.profiles.active=${ACTIVE_PROFILE}"
+    - export SUDO_ASKPASS='/bin/true'
+    - echo "===== Deployment scripts running... ====="
+    - |
+      if [ ! -d "/home/software/internal_test_page" ]; then
+        sudo -A mkdir -p /home/software/internal_test_page
+        sudo -A chown $USER:$USER /home/software/internal_test_page
+      fi
+
+      sudo -A chown -R $USER:$USER /home/software/internal_test_page
+
+      echo "Copying JAR files..."
+      if ls build/libs/*.jar 1> /dev/null 2>&1; then
+        cp build/libs/*.jar /home/software/internal_test_page/
+      else
+        echo "Error: No JAR files to deploy."
+        exit 1
+      fi
+
+      echo "Checking if port 8282 is occupied..."
+      if sudo lsof -ti:8282 > /dev/null 2>&1; then
+        echo "Killing process on port 8282..."
+        sudo lsof -ti:8282 | xargs -r sudo kill -9
+        sleep 3
+      else
+        echo "Port 8282 is free."
+      fi
+
+      echo "Killing existing Java processes..."
+      pkill -9 -f 'java -jar /home/software/internal_test_page/' || true
+      sleep 5
+
+      echo "Starting new application on port 8282..."
+      nohup java $JAVA_OPTS -jar /home/software/internal_test_page/*.jar --server.port=8282 \
+        > /home/software/internal_test_page/output.log 2>&1 &
+      sleep 5
+
+      echo "Verifying if the new process is running..."
+      retries=3
+      while [ $retries -gt 0 ]
+      do
+        if pgrep -f 'InternalTestPage.*SNAPSHOT\.jar' > /dev/null 2>&1
+        then
+          echo "Java application is running."
+          break
+        else
+          echo "Not found. Retrying..."
+          ((retries--))
+          sleep 5
+        fi
+      done
+
+      if [ $retries -eq 0 ]; then
+        echo "Failed to start Java application. Log output:"
+        cat /home/software/internal_test_page/output.log
+        exit 1
+      fi
+
+      if [ $? -eq 0 ]; then
+        echo "SUCCESS" > status_deploy.txt
+      else
+        echo "FAILED" > status_deploy.txt
+      fi
+    - echo "===== Deployment completed ====="
+  tags:
+    - ubuntu_runner
+  artifacts:
+    paths:
+      - status_deploy.txt
+
+#deploy_notify:
+#  stage: deploy_notify
+#  needs: ["deploy"]
+#  script:
+#    - echo "===== Checking deploy result... ====="
+#    - |
+#      DEPLOY_RESULT=$(cat status_deploy.txt)
+#      if [ "$DEPLOY_RESULT" = "SUCCESS" ]; then
+#        echo "배포 성공 알림 전송..."
+#        curl -X POST -H 'Content-type: application/json' \
+#          --data "{\"text\":\"[배포 성공] Pipeline ${CI_PIPELINE_ID} - 배포가 정상적으로 완료되었습니다.\"}" \
+#          "$SLACK_WEBHOOK_URL"
+#      else
+#        echo "배포 실패 알림 전송..."
+#        curl -X POST -H 'Content-type: application/json' \
+#          --data "{\"text\":\"[배포 실패] Pipeline ${CI_PIPELINE_ID} - 배포 단계에서 오류가 발생했습니다.\"}" \
+#          "$SLACK_WEBHOOK_URL"
+#      fi
+#  rules:
+#    - if: '$CI_COMMIT_REF_NAME == "main"'
+#      when: always
+#  allow_failure: true
+#  tags:
+#    - ubuntu_runner

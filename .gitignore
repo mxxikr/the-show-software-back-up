@@ -1,0 +1,32 @@
+# Gradle
+.gradle/
+build/
+
+# IDE
+.idea/
+*.iml
+*.iws
+.project
+.classpath
+.settings/
+*.class
+
+# Build artifacts
+*.jar
+*.war
+*.ear
+
+# Log files
+*.log
+
+# OS generated files
+.DS_Store
+Thumbs.db
+bin/
+*.out
+*~
+*.swp
+
+# Secrets
+application-dev.properties
+application-prod.properties
